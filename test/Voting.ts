@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { Voting } from "../typechain-types"; // Vérifiez le bon chemin d'importation selon votre projet
-import { Signer } from "ethers";
+import { Voting } from "../typechain-types";
+import { Signer } from "ethers/lib/ethers";
 
 describe("Voting", function () {
   let VotingFactory: any;
@@ -10,10 +10,12 @@ describe("Voting", function () {
   let voter1: Signer;
   let voter2: Signer;
   let voter3: Signer;
+  let voter4: Signer;
+  let voter5: Signer;
 
   beforeEach(async function () {
     // Déploie un nouveau contrat Voting avant chaque test
-    [owner, voter1, voter2, voter3] = await ethers.getSigners();
+    [owner, voter1, voter2, voter3, voter4, voter5] = await ethers.getSigners();
     VotingFactory = await ethers.getContractFactory("Voting");
     voting = (await VotingFactory.deploy()) as Voting;
     await voting.waitForDeployment();
@@ -174,5 +176,125 @@ describe("Voting", function () {
 
     const participation = await voting.getCurrentParticipation();
     expect(participation).to.equal(50); // Vérifie que le pourcentage de participation est correct
+  });
+
+  describe("Tests de quorum", function () {
+    beforeEach(async function () {
+      // Ajoute 5 électeurs à la liste blanche
+      await voting.addVoter(await voter1.getAddress());
+      await voting.addVoter(await voter2.getAddress());
+      await voting.addVoter(await voter3.getAddress());
+      await voting.addVoter(await voter4.getAddress());
+      await voting.addVoter(await voter5.getAddress());
+      
+      // Démarrer l'enregistrement des propositions
+      await voting.startProposalsRegistration();
+      
+      // Soumettre des propositions
+      await voting.connect(voter1).submitProposal("Proposition 1");
+      await voting.connect(voter2).submitProposal("Proposition 2");
+      
+      // Terminer l'enregistrement des propositions
+      await voting.endProposalsRegistration();
+      
+      // Démarrer la session de vote
+      await voting.startVotingSession();
+    });
+    
+    it("Devrait définir le quorum par défaut à 50%", async function () {
+      // Vérifie que le quorum est bien initialisé à 50% par défaut
+      expect(await voting.quorumPercentage()).to.equal(50);
+    });
+    
+    it("Devrait permettre à l'administrateur de modifier le quorum", async function () {
+      // Teste que l'administrateur peut modifier le quorum et que l'événement est émis
+      await expect(voting.setQuorum(75))
+        .to.emit(voting, "QuorumUpdated")
+        .withArgs(50, 75);
+        
+      expect(await voting.quorumPercentage()).to.equal(75);
+    });
+    
+    it("Ne devrait pas permettre à un non-administrateur de modifier le quorum", async function () {
+      // Vérifie qu'un non-administrateur ne peut pas modifier le quorum
+      await expect(voting.connect(voter1).setQuorum(30))
+        .to.be.revertedWith("Seul l administrateur peut effectuer cette action");
+    });
+    
+    it("Ne devrait pas permettre un pourcentage de quorum supérieur à 100", async function () {
+      // Vérifie que le quorum ne peut pas dépasser 100%
+      await expect(voting.setQuorum(101))
+        .to.be.revertedWith("Le pourcentage doit etre entre 0 et 100");
+    });
+    
+    it("Devrait retourner le pourcentage correct de participation", async function () {
+      // Vérifie que le calcul de la participation est correct
+      
+      // Participation initiale à 0%
+      expect(await voting.getCurrentParticipation()).to.equal(0);
+      
+      // Deux électeurs votent (2/5 = 40%)
+      await voting.connect(voter1).vote(0);
+      await voting.connect(voter2).vote(1);
+      
+      expect(await voting.getCurrentParticipation()).to.equal(40);
+      
+      // Un troisième électeur vote (3/5 = 60%)
+      await voting.connect(voter3).vote(0);
+      
+      expect(await voting.getCurrentParticipation()).to.equal(60);
+    });
+    
+    it("Devrait échouer au décompte des votes si le quorum n'est pas atteint", async function () {
+      // Vérifie que le décompte des votes échoue si le quorum n'est pas atteint
+      
+      // Seulement 2 électeurs votent (40% de participation)
+      await voting.connect(voter1).vote(0);
+      await voting.connect(voter2).vote(1);
+      
+      // Terminer la session de vote
+      await voting.endVotingSession();
+      
+      // Devrait échouer car le quorum par défaut est de 50%
+      await expect(voting.tallyVotes())
+        .to.be.revertedWith("Le quorum de participation minimum n'a pas ete atteint");
+    });
+    
+    it("Devrait réussir le décompte des votes quand le quorum est atteint", async function () {
+      // Vérifie que le décompte des votes fonctionne quand le quorum est atteint
+      
+      // 3 électeurs votent (60% de participation)
+      await voting.connect(voter1).vote(0);
+      await voting.connect(voter2).vote(0);
+      await voting.connect(voter3).vote(1);
+      
+      // Terminer la session de vote
+      await voting.endVotingSession();
+      
+      // Devrait réussir car la participation (60%) > quorum (50%)
+      await expect(voting.tallyVotes())
+        .to.emit(voting, "WorkflowStatusChange");
+        
+      // Vérifier la proposition gagnante
+      expect(await voting.winningProposalId()).to.equal(0);
+    });
+    
+    it("Devrait réussir le décompte des votes quand le quorum est abaissé", async function () {
+      // Vérifie que l'abaissement du quorum permet de valider une élection
+      
+      // Seulement 2 électeurs votent (40% de participation)
+      await voting.connect(voter1).vote(0);
+      await voting.connect(voter2).vote(1);
+      
+      // Terminer la session de vote
+      await voting.endVotingSession();
+      
+      // Abaisser le quorum à 40%
+      await voting.setQuorum(40);
+      
+      // Devrait maintenant réussir car la participation (40%) >= quorum (40%)
+      await expect(voting.tallyVotes())
+        .to.emit(voting, "WorkflowStatusChange");
+    });
   });
 });
